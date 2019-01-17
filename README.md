@@ -8,9 +8,8 @@ It is fully free and fully open source. The license is Apache 2.0, meaning you a
 
 ## How to write a Java output
 
-> <b>IMPORTANT NOTE:</b> Native support for Java plugins in Logstash is in the experimental phase. While unnecessary
-changes will be avoided, anything may change in future phases. See the ongoing work on the 
-[beta phase](https://github.com/elastic/logstash/pull/10232) of Java plugin support for the most up-to-date status.
+> <b>IMPORTANT NOTE:</b> Native support for Java plugins in Logstash is in the beta phase. While no API changes are
+anticipated, some changes may be necessary before GA.
 
 ### Overview 
 
@@ -19,7 +18,7 @@ Native support for Java plugins in Logstash consists of several components inclu
 * APIs for developing Java plugins. The APIs are in the `co.elastic.logstash.api` package. If a Java plugin 
 references any classes or specific concrete implementations of API interfaces outside that package, breakage may 
 occur because the implementation of classes outside of the API package may change at any time.
-* Tooling to automate the packaging and deployment of Java plugins in Logstash [not complete as of the experimental phase]
+* Tooling to automate the packaging and deployment of Java plugins in Logstash [not complete as of the beta phase]
 
 To develop a new Java output for Logstash, you write a new Java class that conforms to the Logstash Java Output
 API, package it, and install it with the `logstash-plugin` utility. We'll go through each of those steps in this guide.
@@ -28,39 +27,38 @@ API, package it, and install it with the `logstash-plugin` utility. We'll go thr
 
 It is recommended that you start by copying the 
 [example output plugin](https://github.com/logstash-plugins/logstash-output-java_output_example). The example output
-plugin prints events in JSON format to the console. Let's look at the main class in that example output:
+plugin prints events to the console using the event's `toString` method. Let's look at the main class in that 
+example output:
  
 ```java
-@LogstashPlugin(name="java_output_example")
+@LogstashPlugin(name = "java_output_example")
 public class JavaOutputExample implements Output {
 
     public static final PluginConfigSpec<String> PREFIX_CONFIG =
-            Configuration.stringSetting("prefix", "");
+            PluginConfigSpec.stringSetting("prefix", "");
 
+    private final String id;
     private String prefix;
     private PrintStream printer;
     private final CountDownLatch done = new CountDownLatch(1);
     private volatile boolean stopped = false;
 
-    public JavaOutputExample(final Configuration configuration, final Context context) {
-        this(configuration, context, System.out);
+    public JavaOutputExample(final String id, final Configuration configuration, final Context context) {
+        this(id, configuration, context, System.out);
     }
 
-    JavaOutputExample(final Configuration config, final Context context, OutputStream targetStream) {
+    JavaOutputExample(final String id, final Configuration config, final Context context, OutputStream targetStream) {
+        this.id = id;
         prefix = config.get(PREFIX_CONFIG);
         printer = new PrintStream(targetStream);
     }
 
     @Override
     public void output(final Collection<Event> events) {
-        try {
-            Iterator<Event> z = events.iterator();
-            while (z.hasNext() && !stopped) {
-                String s = prefix + z.next().toJson();
-                printer.println(s);
-            }
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException(e);
+        Iterator<Event> z = events.iterator();
+        while (z.hasNext() && !stopped) {
+            String s = prefix + z.next();
+            printer.println(s);
         }
     }
 
@@ -79,6 +77,11 @@ public class JavaOutputExample implements Output {
     public Collection<PluginConfigSpec<?>> configSchema() {
         return Collections.singletonList(PREFIX_CONFIG);
     }
+
+    @Override
+    public String getId() {
+        return id;
+    }
 }
 ```
 
@@ -95,14 +98,14 @@ There are two things to note about the class declaration:
    in the Logstash pipeline definition. For example, this output would be referenced in the output section of the
    Logstash pipeline definition as `output { java_output_example => { .... } }`
   * The value of the `name` property must match the name of the class excluding casing and underscores.
-* The class must implement the `co.elastic.logstash.api.v0.Output` interface.
+* The class must implement the `co.elastic.logstash.api.Output` interface.
 
 #### Plugin settings
 
 The snippet below contains both the setting definition and the method referencing it:
 ```java
 public static final PluginConfigSpec<String> PREFIX_CONFIG =
-        Configuration.stringSetting("prefix", "");
+        PluginConfigSpec.stringSetting("prefix", "");
 
 @Override
 public Collection<PluginConfigSpec<?>> configSchema() {
@@ -120,22 +123,24 @@ no unsupported settings are present.
 
 #### Constructor and initialization
 ```java
+private final String id;
 private String prefix;
 private PrintStream printer;
 
-public JavaOutputExample(final Configuration configuration, final Context context) {
-    this(configuration, context, System.out);
+public JavaOutputExample(final String id, final Configuration configuration, final Context context) {
+    this(id, configuration, context, System.out);
 }
 
-JavaOutputExample(final Configuration config, final Context context, OutputStream targetStream) {
+JavaOutputExample(final String id, final Configuration config, final Context context, OutputStream targetStream) {
+    this.id = id;
     prefix = config.get(PREFIX_CONFIG);
     printer = new PrintStream(targetStream);
 }
 ```
-All Java output plugins must have a constructor taking both a `Configuration` and `Context` argument. This is the
-constructor that will be used to instantiate them at runtime. The retrieval and validation of all plugin settings
-should occur in this constructor. In this example, the values of the `prefix` setting is retrieved and stored in
-a local variable for later use in the `output` method. In this example, a second, pacakge private constructor is
+All Java output plugins must have a constructor taking a `String` id and a `Configuration` and `Context` argument.
+This is the constructor that will be used to instantiate them at runtime. The retrieval and validation of all plugin
+settings should occur in this constructor. In this example, the values of the `prefix` setting is retrieved and stored
+in a local variable for later use in the `output` method. In this example, a second, pacakge private constructor is
 defined that is useful for unit testing with a `Stream` other than `System.out`.
 
 Any additional initialization may occur in the constructor as well. If there are any unrecoverable errors encountered
@@ -146,14 +151,10 @@ will be logged and will prevent Logstash from starting.
 ```java
 @Override
 public void output(final Collection<Event> events) {
-    try {
-        Iterator<Event> z = events.iterator();
-        while (z.hasNext() && !stopped) {
-            String s = prefix + z.next().toJson();
-            printer.println(s);
-        }
-    } catch (JsonProcessingException e) {
-        throw new IllegalStateException(e);
+    Iterator<Event> z = events.iterator();
+    while (z.hasNext() && !stopped) {
+        String s = prefix + z.next();
+        printer.println(s);
     }
 }
 ```
@@ -186,6 +187,17 @@ completed the stop process. Note that this method should **not** signal the outp
 does. The awaitStop mechanism may be implemented in any way that honors the API contract though a `CountDownLatch`
 works well for many use cases.
 
+#### getId method
+
+```java
+@Override
+public String getId() {
+    return id;
+}
+```
+For output plugins, the `getId` method should always return the id that was provided to the plugin through its
+constructor at instantiation time.
+
 #### Unit tests
 Lastly, but certainly not least importantly, unit tests are strongly encouraged. The example output plugin includes
 an [example unit test](https://github.com/logstash-plugins/logstash-output-java_output_example/blob/master/src/test/java/org/logstash/javaapi/JavaOutputExampleTest.java)
@@ -215,7 +227,7 @@ future phase of the Java plugin support project, these Ruby source files will be
 ```
 Gem::Specification.new do |s|
   s.name            = 'logstash-output-java_output_example'
-  s.version         = '0.0.1'
+  s.version         = PLUGIN_VERSION
   s.licenses        = ['Apache-2.0']
   s.summary         = "Example output using Java plugin API"
   s.description     = ""
@@ -237,8 +249,9 @@ Gem::Specification.new do |s|
   s.add_development_dependency 'logstash-devutils'
 end
 ```
-The above file can be used unmodified except that `s.name` must follow the `logstash-output-<output-name>` pattern
-and `s.version` must match the `project.version` specified in the `build.gradle` file.
+The above file can be used unmodified except that `s.name` must follow the `logstash-output-<output-name>` pattern.
+Also, `s.version` must match the `project.version` specified in the `build.gradle` file though those both should
+be read from the `VERSION` file in this example.
 
 `lib/logstash/outputs/<output-name>.rb`
 ```
